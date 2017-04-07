@@ -1,0 +1,2 @@
+version=4
+https://pypi.debian.net/python-engineio/python-engineio-(.+)\.(?:zip|tgz|tbz|txz|(?:tar\.(?:gz|bz2|xz)))
