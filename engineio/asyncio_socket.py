@@ -1,7 +1,8 @@
 import asyncio
-import time
 import six
+import time
 
+from . import exceptions
 from . import packet
 from . import payload
 from . import socket
@@ -18,7 +19,7 @@ class AsyncSocket(socket.Socket):
                                               self.server.ping_timeout)]
             self.queue.task_done()
         except (asyncio.TimeoutError, asyncio.CancelledError):
-            raise IOError()
+            raise exceptions.QueueEmpty()
         if packets == [None]:
             return []
         try:
@@ -44,7 +45,7 @@ class AsyncSocket(socket.Socket):
         elif pkt.packet_type == packet.CLOSE:
             await self.close(wait=False, abort=True)
         else:
-            raise ValueError
+            raise exceptions.UnknownPacketError()
 
     async def send(self, pkt):
         """Send a packet to the client."""
@@ -72,16 +73,16 @@ class AsyncSocket(socket.Socket):
             return await getattr(self, '_upgrade_' + transport)(environ)
         try:
             packets = await self.poll()
-        except IOError as e:
+        except exceptions.QueueEmpty:
             await self.close(wait=False)
-            raise e
+            raise
         return packets
 
     async def handle_post_request(self, environ):
         """Handle a long-polling POST request from the client."""
         length = int(environ.get('CONTENT_LENGTH', '0'))
         if length > self.server.max_http_buffer_size:
-            raise ValueError()
+            raise exceptions.ContentTooLongError()
         else:
             body = await environ['wsgi.input'].read(length)
             p = payload.Payload(encoded_payload=body)
@@ -150,7 +151,7 @@ class AsyncSocket(socket.Socket):
                 packets = None
                 try:
                     packets = await self.poll()
-                except IOError:
+                except exceptions.QueueEmpty:
                     break
                 if not packets:
                     # empty packet list returned -> connection closed
@@ -167,8 +168,22 @@ class AsyncSocket(socket.Socket):
 
         while True:
             p = None
+            wait_task = asyncio.ensure_future(ws.wait())
             try:
-                p = await ws.wait()
+                p = await asyncio.wait_for(wait_task, self.server.ping_timeout)
+            except asyncio.CancelledError:  # pragma: no cover
+                # there is a bug (https://bugs.python.org/issue30508) in
+                # asyncio that causes a "Task exception never retrieved" error
+                # to appear when wait_task raises an exception before it gets
+                # cancelled. Calling wait_task.exception() prevents the error
+                # from being issued in Python 3.6, but causes other errors in
+                # other versions, so we run it with all errors suppressed and
+                # hope for the best.
+                try:
+                    wait_task.exception()
+                except:
+                    pass
+                break
             except:
                 break
             if p is None:
@@ -179,8 +194,12 @@ class AsyncSocket(socket.Socket):
             pkt = packet.Packet(encoded_packet=p)
             try:
                 await self.receive(pkt)
-            except ValueError:
+            except exceptions.UnknownPacketError:
                 pass
+            except:  # pragma: no cover
+                # if we get an unexpected exception we log the error and exit
+                # the connection properly
+                self.server.logger.exception('Receive error')
 
         await self.queue.put(None)  # unlock the writer task so it can exit
         await asyncio.wait_for(writer_task, timeout=None)

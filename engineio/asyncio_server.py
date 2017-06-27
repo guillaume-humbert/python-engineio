@@ -3,6 +3,7 @@ import asyncio
 import six
 from six.moves import urllib
 
+from .exceptions import EngineIOError
 from . import packet
 from . import server
 from . import asyncio_socket
@@ -55,6 +56,7 @@ class AsyncServer(server.Server):
 
     def attach(self, app, engineio_path='engine.io'):
         """Attach the Engine.IO server to an application."""
+        engineio_path = engineio_path.strip('/')
         self._async['create_route'](app, self, '/{}/'.format(engineio_path))
 
     async def send(self, sid, data, binary=None):
@@ -137,9 +139,9 @@ class AsyncServer(server.Server):
                                 r = self._ok(packets, b64=b64)
                             else:
                                 r = packets
-                        except IOError:
+                        except EngineIOError:
                             if sid in self.sockets:  # pragma: no cover
-                                del self.sockets[sid]
+                                await self.disconnect(sid)
                             r = self._bad_request()
                         if sid in self.sockets and self.sockets[sid].closed:
                             del self.sockets[sid]
@@ -152,8 +154,15 @@ class AsyncServer(server.Server):
                     try:
                         await socket.handle_post_request(environ)
                         r = self._ok()
-                    except ValueError:
+                    except EngineIOError:
+                        if sid in self.sockets:  # pragma: no cover
+                            await self.disconnect(sid)
                         r = self._bad_request()
+                    except:  # pragma: no cover
+                        # for any other unexpected errors, we log the error
+                        # and keep going
+                        self.logger.exception('post request handler error')
+                        r = self._ok()
             else:
                 self.logger.warning('Method %s not supported', method)
                 r = self._method_not_found()
@@ -214,9 +223,10 @@ class AsyncServer(server.Server):
                           'pingInterval': int(self.ping_interval * 1000)})
         await s.send(pkt)
 
-        if await self._trigger_event('connect', sid, environ) is False:
-            self.logger.warning('Application rejected connection')
+        ret = await self._trigger_event('connect', sid, environ)
+        if ret is False:
             del self.sockets[sid]
+            self.logger.warning('Application rejected connection')
             return self._unauthorized()
 
         if transport == 'websocket':
@@ -241,6 +251,19 @@ class AsyncServer(server.Server):
                     ret = await self.handlers[event](*args)
                 except asyncio.CancelledError:  # pragma: no cover
                     pass
+                except:
+                    self.logger.exception(event + ' async handler error')
+                    if event == 'connect':
+                        # if connect handler raised error we reject the
+                        # connection
+                        return False
             else:
-                ret = self.handlers[event](*args)
+                try:
+                    return self.handlers[event](*args)
+                except:
+                    self.logger.exception(event + ' handler error')
+                    if event == 'connect':
+                        # if connect handler raised error we reject the
+                        # connection
+                        return False
         return ret

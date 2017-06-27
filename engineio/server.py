@@ -7,6 +7,7 @@ import zlib
 import six
 from six.moves import urllib
 
+from .exceptions import EngineIOError
 from . import packet
 from . import payload
 from . import socket
@@ -262,9 +263,9 @@ class Server(object):
                                 r = self._ok(packets, b64=b64)
                             else:
                                 r = packets
-                        except IOError:
+                        except EngineIOError:
                             if sid in self.sockets:  # pragma: no cover
-                                del self.sockets[sid]
+                                self.disconnect(sid)
                             r = self._bad_request()
                         if sid in self.sockets and self.sockets[sid].closed:
                             del self.sockets[sid]
@@ -277,8 +278,15 @@ class Server(object):
                     try:
                         socket.handle_post_request(environ)
                         r = self._ok()
-                    except ValueError:
+                    except EngineIOError:
+                        if sid in self.sockets:  # pragma: no cover
+                            self.disconnect(sid)
                         r = self._bad_request()
+                    except:  # pragma: no cover
+                        # for any other unexpected errors, we log the error
+                        # and keep going
+                        self.logger.exception('post request handler error')
+                        r = self._ok()
             else:
                 self.logger.warning('Method %s not supported', method)
                 r = self._method_not_found()
@@ -346,9 +354,10 @@ class Server(object):
                           'pingInterval': int(self.ping_interval * 1000)})
         s.send(pkt)
 
-        if self._trigger_event('connect', sid, environ, async=False) is False:
-            self.logger.warning('Application rejected connection')
+        ret = self._trigger_event('connect', sid, environ, async=False)
+        if ret is False:
             del self.sockets[sid]
+            self.logger.warning('Application rejected connection')
             return self._unauthorized()
 
         if transport == 'websocket':
@@ -379,7 +388,14 @@ class Server(object):
             if async:
                 return self.start_background_task(self.handlers[event], *args)
             else:
-                return self.handlers[event](*args)
+                try:
+                    return self.handlers[event](*args)
+                except:
+                    self.logger.exception(event + ' handler error')
+                    if event == 'connect':
+                        # if connect handler raised error we reject the
+                        # connection
+                        return False
 
     def _get_socket(self, sid):
         """Return the socket object for a given session."""

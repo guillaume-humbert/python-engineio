@@ -11,6 +11,7 @@ engineio/async_sanic.py
 engineio/async_threading.py
 engineio/asyncio_server.py
 engineio/asyncio_socket.py
+engineio/exceptions.py
 engineio/middleware.py
 engineio/packet.py
 engineio/payload.py
