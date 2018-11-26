@@ -3,7 +3,7 @@ import asyncio
 import six
 from six.moves import urllib
 
-from .exceptions import EngineIOError
+from . import exceptions
 from . import packet
 from . import server
 from . import asyncio_socket
@@ -18,9 +18,10 @@ class AsyncServer(server.Server):
 
     :param async_mode: The asynchronous model to use. See the Deployment
                        section in the documentation for a description of the
-                       available options. Valid async modes are "aiohttp". If
-                       this argument is not given, an async mode is chosen
-                       based on the installed packages.
+                       available options. Valid async modes are "aiohttp",
+                       "sanic", "tornado" and "asgi". If this argument is not
+                       given, an async mode is chosen based on the installed
+                       packages.
     :param ping_timeout: The time in seconds that the client waits for the
                          server to respond before disconnecting.
     :param ping_interval: The interval in seconds at which the client pings
@@ -45,6 +46,9 @@ class AsyncServer(server.Server):
                  packets. Custom json modules must have ``dumps`` and ``loads``
                  functions that are compatible with the standard library
                  versions.
+    :param async_handlers: If set to ``True``, run message event handlers in
+                           non-blocking threads. To run handlers synchronously,
+                           set to ``False``. The default is ``True``.
     :param kwargs: Reserved for future extensions, any additional parameters
                    given as keyword arguments will be silently ignored.
     """
@@ -52,7 +56,7 @@ class AsyncServer(server.Server):
         return True
 
     def async_modes(self):
-        return ['aiohttp', 'sanic']
+        return ['aiohttp', 'sanic', 'tornado', 'asgi']
 
     def attach(self, app, engineio_path='engine.io'):
         """Attach the Engine.IO server to an application."""
@@ -91,8 +95,14 @@ class AsyncServer(server.Server):
         Note: this method is a coroutine.
         """
         if sid is not None:
-            await self._get_socket(sid).close()
-            del self.sockets[sid]
+            try:
+                socket = self._get_socket(sid)
+            except KeyError:  # pragma: no cover
+                # the socket was already closed or gone
+                pass
+            else:
+                await socket.close()
+                del self.sockets[sid]
         else:
             await asyncio.wait([client.close()
                                 for client in six.itervalues(self.sockets)])
@@ -106,7 +116,11 @@ class AsyncServer(server.Server):
 
         Note: this method is a coroutine.
         """
-        environ = self._async['translate_request'](*args, **kwargs)
+        translate_request = self._async['translate_request']
+        if asyncio.iscoroutinefunction(translate_request):
+            environ = await translate_request(*args, **kwargs)
+        else:
+            environ = translate_request(*args, **kwargs)
         method = environ['REQUEST_METHOD']
         query = urllib.parse.parse_qs(environ.get('QUERY_STRING', ''))
         if 'j' in query:
@@ -139,7 +153,7 @@ class AsyncServer(server.Server):
                                 r = self._ok(packets, b64=b64)
                             else:
                                 r = packets
-                        except EngineIOError:
+                        except exceptions.EngineIOError:
                             if sid in self.sockets:  # pragma: no cover
                                 await self.disconnect(sid)
                             r = self._bad_request()
@@ -154,7 +168,7 @@ class AsyncServer(server.Server):
                     try:
                         await socket.handle_post_request(environ)
                         r = self._ok()
-                    except EngineIOError:
+                    except exceptions.EngineIOError:
                         if sid in self.sockets:  # pragma: no cover
                             await self.disconnect(sid)
                         r = self._bad_request()
@@ -163,11 +177,13 @@ class AsyncServer(server.Server):
                         # and keep going
                         self.logger.exception('post request handler error')
                         r = self._ok()
+            elif method == 'OPTIONS':
+                r = self._ok()
             else:
                 self.logger.warning('Method %s not supported', method)
                 r = self._method_not_found()
         if not isinstance(r, dict):
-            return r or []
+            return r if r is not None else []
         if self.http_compression and \
                 len(r['response']) >= self.compression_threshold:
             encodings = [e.split(';')[0].strip() for e in
@@ -179,9 +195,15 @@ class AsyncServer(server.Server):
                     r['headers'] += [('Content-Encoding', encoding)]
                     break
         cors_headers = self._cors_headers(environ)
-        return self._async['make_response'](r['status'],
-                                            r['headers'] + cors_headers,
-                                            r['response'])
+        make_response = self._async['make_response']
+        if asyncio.iscoroutinefunction(make_response):
+            response = await make_response(r['status'],
+                                           r['headers'] + cors_headers,
+                                           r['response'], environ)
+        else:
+            response = make_response(r['status'], r['headers'] + cors_headers,
+                                     r['response'], environ)
+        return response
 
     def start_background_task(self, target, *args, **kwargs):
         """Start a background task using the appropriate async model.
@@ -212,6 +234,11 @@ class AsyncServer(server.Server):
 
     async def _handle_connect(self, environ, transport, b64=False):
         """Handle a client connection request."""
+        if self.start_service_task:
+            # start the service task to monitor connected clients
+            self.start_service_task = False
+            self.start_background_task(self._service_task)
+
         sid = self._generate_id()
         s = asyncio_socket.AsyncSocket(self, sid)
         self.sockets[sid] = s
@@ -223,7 +250,8 @@ class AsyncServer(server.Server):
                           'pingInterval': int(self.ping_interval * 1000)})
         await s.send(pkt)
 
-        ret = await self._trigger_event('connect', sid, environ)
+        ret = await self._trigger_event('connect', sid, environ,
+                                        run_async=False)
         if ret is False:
             del self.sockets[sid]
             self.logger.warning('Application rejected connection')
@@ -240,30 +268,65 @@ class AsyncServer(server.Server):
             headers = None
             if self.cookie:
                 headers = [('Set-Cookie', self.cookie + '=' + sid)]
-            return self._ok(await s.poll(), headers=headers, b64=b64)
+            try:
+                return self._ok(await s.poll(), headers=headers, b64=b64)
+            except exceptions.QueueEmpty:
+                return self._bad_request()
 
     async def _trigger_event(self, event, *args, **kwargs):
         """Invoke an event handler."""
+        run_async = kwargs.pop('run_async', False)
         ret = None
         if event in self.handlers:
             if asyncio.iscoroutinefunction(self.handlers[event]) is True:
-                try:
-                    ret = await self.handlers[event](*args)
-                except asyncio.CancelledError:  # pragma: no cover
-                    pass
-                except:
-                    self.logger.exception(event + ' async handler error')
-                    if event == 'connect':
-                        # if connect handler raised error we reject the
-                        # connection
-                        return False
+                if run_async:
+                    return self.start_background_task(self.handlers[event],
+                                                      *args)
+                else:
+                    try:
+                        ret = await self.handlers[event](*args)
+                    except asyncio.CancelledError:  # pragma: no cover
+                        pass
+                    except:
+                        self.logger.exception(event + ' async handler error')
+                        if event == 'connect':
+                            # if connect handler raised error we reject the
+                            # connection
+                            return False
             else:
-                try:
-                    return self.handlers[event](*args)
-                except:
-                    self.logger.exception(event + ' handler error')
-                    if event == 'connect':
-                        # if connect handler raised error we reject the
-                        # connection
-                        return False
+                if run_async:
+                    async def async_handler():
+                        return self.handlers[event](*args)
+
+                    return self.start_background_task(async_handler)
+                else:
+                    try:
+                        ret = self.handlers[event](*args)
+                    except:
+                        self.logger.exception(event + ' handler error')
+                        if event == 'connect':
+                            # if connect handler raised error we reject the
+                            # connection
+                            return False
         return ret
+
+    async def _service_task(self):  # pragma: no cover
+        """Monitor connected clients and clean up those that time out."""
+        while True:
+            if len(self.sockets) == 0:
+                # nothing to do
+                await self.sleep(self.ping_timeout)
+                continue
+
+            # go through the entire client list in a ping interval cycle
+            sleep_interval = self.ping_timeout / len(self.sockets)
+
+            try:
+                # iterate over the current clients
+                for socket in self.sockets.copy().values():
+                    if not socket.closing and not socket.closed:
+                        await socket.check_ping_timeout()
+                    await self.sleep(sleep_interval)
+            except:
+                # an unexpected exception has occurred, log it and continue
+                self.logger.exception('service task exception')

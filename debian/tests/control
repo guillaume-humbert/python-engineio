@@ -1,0 +1,3 @@
+Test-Command: python3 -m unittest tests/test_async_eventlet.py
+Depends: python3-engineio
+Restrictions: allow-stderr

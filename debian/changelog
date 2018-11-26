@@ -1,3 +1,26 @@
+python-engineio (3.0.0+dfsg-1) unstable; urgency=medium
+
+  * New upstream release (Closes: #904383).
+  * debian/compat: deleted.
+  * debian/control:
+      - Added dependencies to allow tests and man page creation.
+      - Bumped Standards-Version to 4.2.1.
+      - New format to debhelper-compat and updated level to 11.
+      - Updated Paulo's email.
+  * debian/copyright:
+      - Updated Paulo's email.
+      - Updated long description.
+      - Updated packaging copyright years.
+  * debian/manpages: created.
+  * debian/README.source: created to explain about source missing in examples.
+  * debian/rules:
+      - Added override_dh_auto_build to create man page.
+      - Removed override_dh_auto_test to allow tests.
+  * debian/tests/*: added to perform tests.
+  * debian/upstream/metadata: created.
+
+ -- Paulo Henrique de Lima Santana (phls) <paulo@phls.com.br>  Mon, 26 Nov 2018 16:14:30 -0200
+
 python-engineio (1.6.1-1) unstable; urgency=medium
 
   * New upstream release.

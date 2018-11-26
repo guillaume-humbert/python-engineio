@@ -1,7 +1,8 @@
+import asyncio
 import sys
 from urllib.parse import urlsplit
 
-import aiohttp
+from aiohttp.web import Response, WebSocketResponse
 import six
 
 
@@ -14,6 +15,8 @@ def create_route(app, engineio_server, engineio_endpoint):
     """
     app.router.add_get(engineio_endpoint, engineio_server.handle_request)
     app.router.add_post(engineio_endpoint, engineio_server.handle_request)
+    app.router.add_route('OPTIONS', engineio_endpoint,
+                         engineio_server.handle_request)
 
 
 def translate_request(request):
@@ -69,12 +72,12 @@ def translate_request(request):
     return environ
 
 
-def make_response(status, headers, payload):
+def make_response(status, headers, payload, environ):
     """This function generates an appropriate response object for this async
     mode.
     """
-    return aiohttp.web.Response(body=payload, status=int(status.split()[0]),
-                                headers=headers)
+    return Response(body=payload, status=int(status.split()[0]),
+                    headers=headers)
 
 
 class WebSocket(object):  # pragma: no cover
@@ -88,7 +91,7 @@ class WebSocket(object):  # pragma: no cover
 
     async def __call__(self, environ):
         request = environ['aiohttp.request']
-        self._sock = aiohttp.web.WebSocketResponse()
+        self._sock = WebSocketResponse()
         await self._sock.prepare(request)
 
         self.environ = environ
@@ -100,9 +103,13 @@ class WebSocket(object):  # pragma: no cover
 
     async def send(self, message):
         if isinstance(message, bytes):
-            self._sock.send_bytes(message)
+            f = self._sock.send_bytes
         else:
-            self._sock.send_str(message)
+            f = self._sock.send_str
+        if asyncio.iscoroutinefunction(f):
+            await f(message)
+        else:
+            f(message)
 
     async def wait(self):
         msg = await self._sock.receive()

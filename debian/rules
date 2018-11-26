@@ -6,4 +6,6 @@ export PYBUILD_NAME = python3-engineio
 %:
 	dh $@ --with python3 --buildsystem=pybuild
 
-override_dh_auto_test:
+override_dh_auto_build:
+	dh_auto_build
+	PYTHONPATH=. python3 -m sphinx -N -bman docs/ build/man # Manpage generator

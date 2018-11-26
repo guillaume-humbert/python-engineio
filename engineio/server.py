@@ -7,7 +7,7 @@ import zlib
 import six
 from six.moves import urllib
 
-from .exceptions import EngineIOError
+from . import exceptions
 from . import packet
 from . import payload
 from . import socket
@@ -30,25 +30,33 @@ class Server(object):
                        The first async mode that has all its dependencies
                        installed is then one that is chosen.
     :param ping_timeout: The time in seconds that the client waits for the
-                         server to respond before disconnecting.
+                         server to respond before disconnecting. The default
+                         is 60 seconds.
     :param ping_interval: The interval in seconds at which the client pings
-                          the server.
+                          the server. The default is 25 seconds.
     :param max_http_buffer_size: The maximum size of a message when using the
-                                 polling transport.
-    :param allow_upgrades: Whether to allow transport upgrades or not.
+                                 polling transport. The default is 100,000,000
+                                 bytes.
+    :param allow_upgrades: Whether to allow transport upgrades or not. The
+                           default is ``True``.
     :param http_compression: Whether to compress packages when using the
-                             polling transport.
+                             polling transport. The default is ``True``.
     :param compression_threshold: Only compress messages when their byte size
-                                  is greater than this value.
+                                  is greater than this value. The default is
+                                  1024 bytes.
     :param cookie: Name of the HTTP cookie that contains the client session
                    id. If set to ``None``, a cookie is not sent to the client.
-    :param cors_allowed_origins: List of origins that are allowed to connect
-                                 to this server. All origins are allowed by
-                                 default.
+                   The default is ``'io'``.
+    :param cors_allowed_origins: Origin or list of origins that are allowed to
+                                 connect to this server. All origins are
+                                 allowed by default, which is equivalent to
+                                 setting this argument to ``'*'``.
     :param cors_credentials: Whether credentials (cookies, authentication) are
-                             allowed in requests to this server.
+                             allowed in requests to this server. The default
+                             is ``True``.
     :param logger: To enable logging set to ``True`` or pass a logger object to
-                   use. To disable logging set to ``False``.
+                   use. To disable logging set to ``False``. The default is
+                   ``False``.
     :param json: An alternative json module to use for encoding and decoding
                  packets. Custom json modules must have ``dumps`` and ``loads``
                  functions that are compatible with the standard library
@@ -56,18 +64,23 @@ class Server(object):
     :param async_handlers: If set to ``True``, run message event handlers in
                            non-blocking threads. To run handlers synchronously,
                            set to ``False``. The default is ``True``.
+    :param monitor_clients: If set to ``True``, a background task will ensure
+                            inactive clients are closed. Set to ``False`` to
+                            disable the monitoring task (not recommended). The
+                            default is ``True``.
     :param kwargs: Reserved for future extensions, any additional parameters
                    given as keyword arguments will be silently ignored.
     """
     compression_methods = ['gzip', 'deflate']
     event_names = ['connect', 'disconnect', 'message']
+    _default_monitor_clients = True
 
     def __init__(self, async_mode=None, ping_timeout=60, ping_interval=25,
                  max_http_buffer_size=100000000, allow_upgrades=True,
                  http_compression=True, compression_threshold=1024,
                  cookie='io', cors_allowed_origins=None,
                  cors_credentials=True, logger=False, json=None,
-                 async_handlers=True, **kwargs):
+                 async_handlers=True, monitor_clients=None, **kwargs):
         self.ping_timeout = ping_timeout
         self.ping_interval = ping_interval
         self.max_http_buffer_size = max_http_buffer_size
@@ -80,6 +93,8 @@ class Server(object):
         self.async_handlers = async_handlers
         self.sockets = {}
         self.handlers = {}
+        self.start_service_task = monitor_clients \
+            if monitor_clients is not None else self._default_monitor_clients
         if json is not None:
             packet.Packet.json = json
         if not isinstance(logger, bool):
@@ -114,8 +129,8 @@ class Server(object):
         if self.async_mode is None:
             raise ValueError('Invalid async_mode specified')
         if self.is_asyncio_based() and \
-                ('asyncio' not in self._async or
-                 not self._async['asyncio']):  # pragma: no cover
+                ('asyncio' not in self._async or not
+                 self._async['asyncio']):  # pragma: no cover
             raise ValueError('The selected async_mode is not asyncio '
                              'compatible')
         if not self.is_asyncio_based() and 'asyncio' in self._async and \
@@ -199,8 +214,14 @@ class Server(object):
                     is not given, then all clients are closed.
         """
         if sid is not None:
-            self._get_socket(sid).close()
-            del self.sockets[sid]
+            try:
+                socket = self._get_socket(sid)
+            except KeyError:  # pragma: no cover
+                # the socket was already closed or gone
+                pass
+            else:
+                socket.close()
+                del self.sockets[sid]
         else:
             for client in six.itervalues(self.sockets):
                 client.close()
@@ -263,7 +284,7 @@ class Server(object):
                                 r = self._ok(packets, b64=b64)
                             else:
                                 r = packets
-                        except EngineIOError:
+                        except exceptions.EngineIOError:
                             if sid in self.sockets:  # pragma: no cover
                                 self.disconnect(sid)
                             r = self._bad_request()
@@ -278,7 +299,7 @@ class Server(object):
                     try:
                         socket.handle_post_request(environ)
                         r = self._ok()
-                    except EngineIOError:
+                    except exceptions.EngineIOError:
                         if sid in self.sockets:  # pragma: no cover
                             self.disconnect(sid)
                         r = self._bad_request()
@@ -287,6 +308,8 @@ class Server(object):
                         # and keep going
                         self.logger.exception('post request handler error')
                         r = self._ok()
+            elif method == 'OPTIONS':
+                r = self._ok()
             else:
                 self.logger.warning('Method %s not supported', method)
                 r = self._method_not_found()
@@ -343,6 +366,11 @@ class Server(object):
 
     def _handle_connect(self, environ, start_response, transport, b64=False):
         """Handle a client connection request."""
+        if self.start_service_task:
+            # start the service task to monitor connected clients
+            self.start_service_task = False
+            self.start_background_task(self._service_task)
+
         sid = self._generate_id()
         s = socket.Socket(self, sid)
         self.sockets[sid] = s
@@ -354,7 +382,7 @@ class Server(object):
                           'pingInterval': int(self.ping_interval * 1000)})
         s.send(pkt)
 
-        ret = self._trigger_event('connect', sid, environ, async=False)
+        ret = self._trigger_event('connect', sid, environ, run_async=False)
         if ret is False:
             del self.sockets[sid]
             self.logger.warning('Application rejected connection')
@@ -371,7 +399,10 @@ class Server(object):
             headers = None
             if self.cookie:
                 headers = [('Set-Cookie', self.cookie + '=' + sid)]
-            return self._ok(s.poll(), headers=headers, b64=b64)
+            try:
+                return self._ok(s.poll(), headers=headers, b64=b64)
+            except exceptions.QueueEmpty:
+                return self._bad_request()
 
     def _upgrades(self, sid, transport):
         """Return the list of possible upgrades for a client connection."""
@@ -383,9 +414,9 @@ class Server(object):
 
     def _trigger_event(self, event, *args, **kwargs):
         """Invoke an event handler."""
-        async = kwargs.pop('async', False)
+        run_async = kwargs.pop('run_async', False)
         if event in self.handlers:
-            if async:
+            if run_async:
                 return self.start_background_task(self.handlers[event], *args)
             else:
                 try:
@@ -445,14 +476,25 @@ class Server(object):
 
     def _cors_headers(self, environ):
         """Return the cross-origin-resource-sharing headers."""
-        if self.cors_allowed_origins is not None and \
-                environ.get('HTTP_ORIGIN', '') not in \
-                self.cors_allowed_origins:
+        if isinstance(self.cors_allowed_origins, six.string_types):
+            if self.cors_allowed_origins == '*':
+                allowed_origins = None
+            else:
+                allowed_origins = [self.cors_allowed_origins]
+        else:
+            allowed_origins = self.cors_allowed_origins
+        if allowed_origins is not None and \
+                environ.get('HTTP_ORIGIN', '') not in allowed_origins:
             return []
         if 'HTTP_ORIGIN' in environ:
             headers = [('Access-Control-Allow-Origin', environ['HTTP_ORIGIN'])]
         else:
             headers = [('Access-Control-Allow-Origin', '*')]
+        if environ['REQUEST_METHOD'] == 'OPTIONS':
+            headers += [('Access-Control-Allow-Methods', 'OPTIONS, GET, POST')]
+        if 'HTTP_ACCESS_CONTROL_REQUEST_HEADERS' in environ:
+            headers += [('Access-Control-Allow-Headers',
+                         environ['HTTP_ACCESS_CONTROL_REQUEST_HEADERS'])]
         if self.cors_credentials:
             headers += [('Access-Control-Allow-Credentials', 'true')]
         return headers
@@ -467,3 +509,26 @@ class Server(object):
     def _deflate(self, response):
         """Apply deflate compression to a response."""
         return zlib.compress(response)
+
+    def _service_task(self):  # pragma: no cover
+        """Monitor connected clients and clean up those that time out."""
+        while True:
+            if len(self.sockets) == 0:
+                # nothing to do
+                self.sleep(self.ping_timeout)
+                continue
+
+            # go through the entire client list in a ping interval cycle
+            sleep_interval = self.ping_timeout / len(self.sockets)
+
+            try:
+                # iterate over the current clients
+                for s in self.sockets.copy().values():
+                    if not s.closing and not s.closed:
+                        s.check_ping_timeout()
+                    self.sleep(sleep_interval)
+            except (SystemExit, KeyboardInterrupt):
+                break
+            except:
+                # an unexpected exception has occurred, log it and continue
+                self.logger.exception('service task exception')

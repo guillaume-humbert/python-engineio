@@ -1,0 +1,12 @@
+python-engineio
+---------------
+
+The upstream tarball was modified to remove the examples dir because
+source-is-missing:
+examples/aiohttp/static/engine.io.js
+examples/asgi/static/engine.io.js
+examples/sanic/static/engine.io.js
+examples/tornado/static/engine.io.js
+examples/wsgi/static/engine.io.js
+
+ -- Paulo Henrique de Lima Santana (phls) <paulo@phls.com.br>  Mon, 26 Nov 2018 16:14:30 -0200
