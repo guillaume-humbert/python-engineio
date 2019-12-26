@@ -8,4 +8,4 @@ export PYBUILD_NAME = python3-engineio
 
 override_dh_auto_build:
 	dh_auto_build
-	PYTHONPATH=. python3 -m sphinx -N -bman docs/ build/man # Manpage generator
+	PYTHONPATH=. python3 -m sphinx -N -bman debian/manpage/ build/man # Manpage generator
