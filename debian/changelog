@@ -2,6 +2,8 @@ python-engineio (3.11.1-1) unstable; urgency=medium
 
   * New upstream version 3.11.1.
   * debian/control:
+      - Changed Maintainer's email.
+      - Added Vcs-* fields for repository in salsa.
       - Bumped Standards-Version to 4.4.1.
       - Updated DH to level 12.
 
