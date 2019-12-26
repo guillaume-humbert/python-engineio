@@ -9,6 +9,7 @@ python-engineio (3.11.1-1) unstable; urgency=medium
       - Changed Maintainer's email.
       - Added Vcs-* fields for repository in salsa.
       - Bumped Standards-Version to 4.4.1.
+      - Bumped X-Python3-Version to 3.7.
       - Updated DH to level 12.
   * debian/copyright:
       - Changed Maintainer's email.
