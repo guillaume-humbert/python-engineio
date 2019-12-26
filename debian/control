@@ -7,12 +7,15 @@ Build-Depends: debhelper-compat (= 12),
                python3,
                python3-aiohttp,
                python3-all,
+               python3-coverage,
                python3-eventlet,
                python3-mock,
+               python3-requests,
                python3-setuptools,
                python3-six,
                python3-sphinx,
                python3-tornado,
+               python3-websocket,
 X-Python3-Version: >= 3.5
 Standards-Version: 4.4.1
 Rules-Requires-Root: no

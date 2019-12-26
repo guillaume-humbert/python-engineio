@@ -2,6 +2,8 @@ python-engineio (3.11.1-1) unstable; urgency=medium
 
   * New upstream version 3.11.1.
   * debian/control:
+      - Added packages python3-coverage, python3-requests and
+        python3-websocket in Build-Depends.
       - Added 'Rules-Requires-Root: no' in source stanza.
       - Changed Maintainer's email.
       - Added Vcs-* fields for repository in salsa.
