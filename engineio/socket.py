@@ -1,4 +1,5 @@
 import six
+import sys
 import time
 
 from . import exceptions
@@ -33,11 +34,12 @@ class Socket(object):
             raise exceptions.QueueEmpty()
         if packets == [None]:
             return []
-        try:
-            packets.append(self.queue.get(block=False))
-            self.queue.task_done()
-        except self.server._async['queue'].Empty:
-            pass
+        while True:
+            try:
+                packets.append(self.queue.get(block=False))
+                self.queue.task_done()
+            except self.server._async['queue'].Empty:
+                break
         return packets
 
     def receive(self, pkt):
@@ -53,7 +55,7 @@ class Socket(object):
             self.send(packet.Packet(packet.PONG, pkt.data))
         elif pkt.packet_type == packet.MESSAGE:
             self.server._trigger_event('message', self.sid, pkt.data,
-                                       async=self.server.async_handlers)
+                                       run_async=self.server.async_handlers)
         elif pkt.packet_type == packet.UPGRADE:
             self.send(packet.Packet(packet.NOOP))
         elif pkt.packet_type == packet.CLOSE:
@@ -61,14 +63,26 @@ class Socket(object):
         else:
             raise exceptions.UnknownPacketError()
 
-    def send(self, pkt):
-        """Send a packet to the client."""
+    def check_ping_timeout(self):
+        """Make sure the client is still sending pings.
+
+        This helps detect disconnections for long-polling clients.
+        """
         if self.closed:
-            raise IOError('Socket is closed')
+            raise exceptions.SocketIsClosedError()
         if time.time() - self.last_ping > self.server.ping_timeout:
             self.server.logger.info('%s: Client is gone, closing socket',
                                     self.sid)
-            self.close(wait=False, abort=True)
+            # Passing abort=False here will cause close() to write a
+            # CLOSE packet. This has the effect of updating half-open sockets
+            # to their correct state of disconnected
+            self.close(wait=False, abort=False)
+            return False
+        return True
+
+    def send(self, pkt):
+        """Send a packet to the client."""
+        if not self.check_ping_timeout():
             return
         self.queue.put(pkt)
         self.server.logger.info('%s: Sending packet %s data %s',
@@ -90,8 +104,9 @@ class Socket(object):
         try:
             packets = self.poll()
         except exceptions.QueueEmpty:
+            exc = sys.exc_info()
             self.close(wait=False)
-            raise
+            six.reraise(*exc)
         return packets
 
     def handle_post_request(self, environ):
@@ -109,7 +124,7 @@ class Socket(object):
         """Close the socket connection."""
         if not self.closed and not self.closing:
             self.closing = True
-            self.server._trigger_event('disconnect', self.sid, async=False)
+            self.server._trigger_event('disconnect', self.sid, run_async=False)
             if not abort:
                 self.send(packet.Packet(packet.CLOSE))
             self.closed = True
@@ -207,16 +222,19 @@ class Socket(object):
             pkt = packet.Packet(encoded_packet=p)
             try:
                 self.receive(pkt)
-            except exceptions.UnknownPacketError:
+            except exceptions.UnknownPacketError:  # pragma: no cover
                 pass
+            except exceptions.SocketIsClosedError:  # pragma: no cover
+                self.server.logger.info('Receive error -- socket is closed')
+                break
             except:  # pragma: no cover
                 # if we get an unexpected exception we log the error and exit
                 # the connection properly
-                self.server.logger.exception('Receive error')
+                self.server.logger.exception('Unknown receive error')
                 break
 
         self.queue.put(None)  # unlock the writer task so that it can exit
         writer_task.join()
-        self.close(wait=True, abort=True)
+        self.close(wait=False, abort=True)
 
         return []

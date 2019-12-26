@@ -18,7 +18,7 @@ def create_route(app, engineio_server, engineio_endpoint):
     endpoint.
     """
     app.add_route(engineio_server.handle_request, engineio_endpoint,
-                  methods=['GET', 'POST'])
+                  methods=['GET', 'POST', 'OPTIONS'])
     try:
         app.enable_websocket()
     except AttributeError:
@@ -89,7 +89,7 @@ def translate_request(request):
     return environ
 
 
-def make_response(status, headers, payload):
+def make_response(status, headers, payload, environ):
     """This function generates an appropriate response object for this async
     mode.
     """

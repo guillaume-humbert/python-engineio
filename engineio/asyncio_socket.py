@@ -1,5 +1,6 @@
 import asyncio
 import six
+import sys
 import time
 
 from . import exceptions
@@ -39,7 +40,9 @@ class AsyncSocket(socket.Socket):
             self.last_ping = time.time()
             await self.send(packet.Packet(packet.PONG, pkt.data))
         elif pkt.packet_type == packet.MESSAGE:
-            await self.server._trigger_event('message', self.sid, pkt.data)
+            await self.server._trigger_event(
+                'message', self.sid, pkt.data,
+                run_async=self.server.async_handlers)
         elif pkt.packet_type == packet.UPGRADE:
             await self.send(packet.Packet(packet.NOOP))
         elif pkt.packet_type == packet.CLOSE:
@@ -47,14 +50,27 @@ class AsyncSocket(socket.Socket):
         else:
             raise exceptions.UnknownPacketError()
 
-    async def send(self, pkt):
-        """Send a packet to the client."""
+    async def check_ping_timeout(self):
+        """Make sure the client is still sending pings.
+
+        This helps detect disconnections for long-polling clients.
+        """
         if self.closed:
-            raise IOError('Socket is closed')
+            raise exceptions.SocketIsClosedError()
         if time.time() - self.last_ping > self.server.ping_timeout:
             self.server.logger.info('%s: Client is gone, closing socket',
                                     self.sid)
-            return await self.close(wait=False, abort=True)
+            # Passing abort=False here will cause close() to write a
+            # CLOSE packet. This has the effect of updating half-open sockets
+            # to their correct state of disconnected
+            await self.close(wait=False, abort=False)
+            return False
+        return True
+
+    async def send(self, pkt):
+        """Send a packet to the client."""
+        if not await self.check_ping_timeout():
+            return
         self.server.logger.info('%s: Sending packet %s data %s',
                                 self.sid, packet.packet_names[pkt.packet_type],
                                 pkt.data if not isinstance(pkt.data, bytes)
@@ -74,8 +90,9 @@ class AsyncSocket(socket.Socket):
         try:
             packets = await self.poll()
         except exceptions.QueueEmpty:
+            exc = sys.exc_info()
             await self.close(wait=False)
-            raise
+            six.reraise(*exc)
         return packets
 
     async def handle_post_request(self, environ):
@@ -119,7 +136,10 @@ class AsyncSocket(socket.Socket):
             # the socket was already connected, so this is an upgrade
             await self.queue.join()  # flush the queue first
 
-            pkt = await ws.wait()
+            try:
+                pkt = await ws.wait()
+            except IOError:  # pragma: no cover
+                return
             if pkt != packet.Packet(packet.PING,
                                     data=six.text_type('probe')).encode(
                                         always_bytes=False):
@@ -131,7 +151,10 @@ class AsyncSocket(socket.Socket):
                 data=six.text_type('probe')).encode(always_bytes=False))
             await self.send(packet.Packet(packet.NOOP))
 
-            pkt = await ws.wait()
+            try:
+                pkt = await ws.wait()
+            except IOError:  # pragma: no cover
+                return
             decoded_pkt = packet.Packet(encoded_packet=pkt)
             if decoded_pkt.packet_type != packet.UPGRADE:
                 self.upgraded = False
@@ -194,13 +217,16 @@ class AsyncSocket(socket.Socket):
             pkt = packet.Packet(encoded_packet=p)
             try:
                 await self.receive(pkt)
-            except exceptions.UnknownPacketError:
+            except exceptions.UnknownPacketError:  # pragma: no cover
                 pass
+            except exceptions.SocketIsClosedError:  # pragma: no cover
+                self.server.logger.info('Receive error -- socket is closed')
+                break
             except:  # pragma: no cover
                 # if we get an unexpected exception we log the error and exit
                 # the connection properly
-                self.server.logger.exception('Receive error')
+                self.server.logger.exception('Unknown receive error')
 
         await self.queue.put(None)  # unlock the writer task so it can exit
         await asyncio.wait_for(writer_task, timeout=None)
-        await self.close(wait=True, abort=True)
+        await self.close(wait=False, abort=True)

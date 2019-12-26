@@ -11,7 +11,7 @@ Features
 
 - Fully compatible with the Javascript `engine.io-client`_ library, versions 1.5.0 and up.
 - Compatible with Python 2.7 and Python 3.3+.
-- Supports large number of clients even on modest hardware when used with an asynchronous server based on `asyncio`_(`sanic`_ or `aiohttp`_), `eventlet`_ or `gevent`_. For development and testing, any WSGI compliant multi-threaded server can be used.
+- Supports large number of clients even on modest hardware when used with an asynchronous server based on `asyncio`_ (`sanic`_, `aiohttp`_ or `tornado`_), `eventlet`_ or `gevent`_. For development and testing, any WSGI compliant multi-threaded server can be used.
 - Includes a WSGI middleware that integrates Engine.IO traffic with standard WSGI applications.
 - Uses an event-based architecture implemented with decorators that hides the details of the protocol.
 - Implements HTTP long-polling and WebSocket transports.
@@ -31,7 +31,6 @@ small Flask application that serves the HTML/Javascript to the client:
 
     import engineio
     import eventlet
-    import eventlet.wsgi
     from flask import Flask, render_template
 
     eio = engineio.Server()
@@ -57,11 +56,10 @@ small Flask application that serves the HTML/Javascript to the client:
 
     if __name__ == '__main__':
         # wrap Flask application with engineio's middleware
-        app = engineio.Middleware(eio, app)
+        app = engineio.WSGIApp(eio, app)
 
         # deploy as an eventlet WSGI server
         eventlet.wsgi.server(eventlet.listen(('', 8000)), app)
-
 
 And below is a similar example, coded for asyncio (Python 3.5+ only) with the
 `aiohttp`_ framework:
@@ -111,6 +109,7 @@ Resources
 .. _asyncio: https://docs.python.org/3/library/asyncio.html
 .. _sanic: http://sanic.readthedocs.io/
 .. _aiohttp: http://aiohttp.readthedocs.io/
+.. _tornado: http://www.tornadoweb.org/
 .. _eventlet: http://eventlet.net/
 .. _gevent: http://gevent.org/
 .. _aiohttp: http://aiohttp.readthedocs.io/
