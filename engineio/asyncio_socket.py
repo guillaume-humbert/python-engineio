@@ -10,9 +10,6 @@ from . import socket
 
 
 class AsyncSocket(socket.Socket):
-    def create_queue(self):
-        return asyncio.Queue()
-
     async def poll(self):
         """Wait for packets to send to the client."""
         try:
@@ -57,7 +54,8 @@ class AsyncSocket(socket.Socket):
         """
         if self.closed:
             raise exceptions.SocketIsClosedError()
-        if time.time() - self.last_ping > self.server.ping_timeout:
+        if time.time() - self.last_ping > self.server.ping_interval + \
+                self.server.ping_interval_grace_period:
             self.server.logger.info('%s: Client is gone, closing socket',
                                     self.sid)
             # Passing abort=False here will cause close() to write a
@@ -71,11 +69,14 @@ class AsyncSocket(socket.Socket):
         """Send a packet to the client."""
         if not await self.check_ping_timeout():
             return
+        if self.upgrading:
+            self.packet_backlog.append(pkt)
+        else:
+            await self.queue.put(pkt)
         self.server.logger.info('%s: Sending packet %s data %s',
                                 self.sid, packet.packet_names[pkt.packet_type],
                                 pkt.data if not isinstance(pkt.data, bytes)
                                 else '<binary>')
-        await self.queue.put(pkt)
 
     async def handle_get_request(self, environ):
         """Handle a long-polling GET request from the client."""
@@ -121,35 +122,32 @@ class AsyncSocket(socket.Socket):
         """Upgrade the connection from polling to websocket."""
         if self.upgraded:
             raise IOError('Socket has been upgraded already')
-        if self.server._async['websocket'] is None or \
-                self.server._async['websocket_class'] is None:
+        if self.server._async['websocket'] is None:
             # the selected async mode does not support websocket
             return self.server._bad_request()
-        websocket_class = getattr(self.server._async['websocket'],
-                                  self.server._async['websocket_class'])
-        ws = websocket_class(self._websocket_handler)
+        ws = self.server._async['websocket'](self._websocket_handler)
         return await ws(environ)
 
     async def _websocket_handler(self, ws):
         """Engine.IO handler for websocket transport."""
         if self.connected:
             # the socket was already connected, so this is an upgrade
-            await self.queue.join()  # flush the queue first
+            self.upgrading = True  # hold packet sends during the upgrade
 
             try:
                 pkt = await ws.wait()
             except IOError:  # pragma: no cover
                 return
-            if pkt != packet.Packet(packet.PING,
-                                    data=six.text_type('probe')).encode(
-                                        always_bytes=False):
+            decoded_pkt = packet.Packet(encoded_packet=pkt)
+            if decoded_pkt.packet_type != packet.PING or \
+                    decoded_pkt.data != 'probe':
                 self.server.logger.info(
                     '%s: Failed websocket upgrade, no PING packet', self.sid)
                 return
             await ws.send(packet.Packet(
                 packet.PONG,
                 data=six.text_type('probe')).encode(always_bytes=False))
-            await self.send(packet.Packet(packet.NOOP))
+            await self.queue.put(packet.Packet(packet.NOOP))  # end poll
 
             try:
                 pkt = await ws.wait()
@@ -164,6 +162,12 @@ class AsyncSocket(socket.Socket):
                     self.sid, pkt)
                 return
             self.upgraded = True
+
+            # flush any packets that were sent during the upgrade
+            for pkt in self.packet_backlog:
+                await self.queue.put(pkt)
+            self.packet_backlog = []
+            self.upgrading = False
         else:
             self.connected = True
             self.upgraded = True

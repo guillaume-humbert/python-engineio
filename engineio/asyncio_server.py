@@ -20,12 +20,18 @@ class AsyncServer(server.Server):
                        section in the documentation for a description of the
                        available options. Valid async modes are "aiohttp",
                        "sanic", "tornado" and "asgi". If this argument is not
-                       given, an async mode is chosen based on the installed
-                       packages.
+                       given, "aiohttp" is tried first, followed by "sanic",
+                       "tornado", and finally "asgi". The first async mode that
+                       has all its dependencies installed is the one that is
+                       chosen.
     :param ping_timeout: The time in seconds that the client waits for the
                          server to respond before disconnecting.
     :param ping_interval: The interval in seconds at which the client pings
-                          the server.
+                          the server. The default is 25 seconds. For advanced
+                          control, a two element tuple can be given, where
+                          the first number is the ping interval and the second
+                          is a grace period added by the server. The default
+                          grace period is 5 seconds.
     :param max_http_buffer_size: The maximum size of a message when using the
                                  polling transport.
     :param allow_upgrades: Whether to allow transport upgrades or not.
@@ -35,9 +41,11 @@ class AsyncServer(server.Server):
                                   is greater than this value.
     :param cookie: Name of the HTTP cookie that contains the client session
                    id. If set to ``None``, a cookie is not sent to the client.
-    :param cors_allowed_origins: List of origins that are allowed to connect
-                                 to this server. All origins are allowed by
-                                 default.
+    :param cors_allowed_origins: Origin or list of origins that are allowed to
+                                 connect to this server. Only the same origin
+                                 is allowed by default. Set this argument to
+                                 ``'*'`` to allow all origins, or to ``[]`` to
+                                 disable CORS handling.
     :param cors_credentials: Whether credentials (cookies, authentication) are
                              allowed in requests to this server.
     :param logger: To enable logging set to ``True`` or pass a logger object to
@@ -86,6 +94,64 @@ class AsyncServer(server.Server):
         await socket.send(packet.Packet(packet.MESSAGE, data=data,
                                         binary=binary))
 
+    async def get_session(self, sid):
+        """Return the user session for a client.
+
+        :param sid: The session id of the client.
+
+        The return value is a dictionary. Modifications made to this
+        dictionary are not guaranteed to be preserved. If you want to modify
+        the user session, use the ``session`` context manager instead.
+        """
+        socket = self._get_socket(sid)
+        return socket.session
+
+    async def save_session(self, sid, session):
+        """Store the user session for a client.
+
+        :param sid: The session id of the client.
+        :param session: The session dictionary.
+        """
+        socket = self._get_socket(sid)
+        socket.session = session
+
+    def session(self, sid):
+        """Return the user session for a client with context manager syntax.
+
+        :param sid: The session id of the client.
+
+        This is a context manager that returns the user session dictionary for
+        the client. Any changes that are made to this dictionary inside the
+        context manager block are saved back to the session. Example usage::
+
+            @eio.on('connect')
+            def on_connect(sid, environ):
+                username = authenticate_user(environ)
+                if not username:
+                    return False
+                with eio.session(sid) as session:
+                    session['username'] = username
+
+            @eio.on('message')
+            def on_message(sid, msg):
+                async with eio.session(sid) as session:
+                    print('received message from ', session['username'])
+        """
+        class _session_context_manager(object):
+            def __init__(self, server, sid):
+                self.server = server
+                self.sid = sid
+                self.session = None
+
+            async def __aenter__(self):
+                self.session = await self.server.get_session(sid)
+                return self.session
+
+            async def __aexit__(self, *args):
+                await self.server.save_session(sid, self.session)
+
+        return _session_context_manager(self, sid)
+
     async def disconnect(self, sid=None):
         """Disconnect a client.
 
@@ -102,7 +168,8 @@ class AsyncServer(server.Server):
                 pass
             else:
                 await socket.close()
-                del self.sockets[sid]
+                if sid in self.sockets:  # pragma: no cover
+                    del self.sockets[sid]
         else:
             await asyncio.wait([client.close()
                                 for client in six.itervalues(self.sockets)])
@@ -121,69 +188,102 @@ class AsyncServer(server.Server):
             environ = await translate_request(*args, **kwargs)
         else:
             environ = translate_request(*args, **kwargs)
+
+        if self.cors_allowed_origins != []:
+            # Validate the origin header if present
+            # This is important for WebSocket more than for HTTP, since
+            # browsers only apply CORS controls to HTTP.
+            origin = environ.get('HTTP_ORIGIN')
+            if origin:
+                allowed_origins = self._cors_allowed_origins(environ)
+                if allowed_origins is not None and origin not in \
+                        allowed_origins:
+                    self.logger.info(origin + ' is not an accepted origin.')
+                    r = self._bad_request()
+                    make_response = self._async['make_response']
+                    if asyncio.iscoroutinefunction(make_response):
+                        response = await make_response(
+                            r['status'], r['headers'], r['response'], environ)
+                    else:
+                        response = make_response(r['status'], r['headers'],
+                                                 r['response'], environ)
+                    return response
+
         method = environ['REQUEST_METHOD']
         query = urllib.parse.parse_qs(environ.get('QUERY_STRING', ''))
+
+        sid = query['sid'][0] if 'sid' in query else None
+        b64 = False
+        jsonp = False
+        jsonp_index = None
+
+        if 'b64' in query:
+            if query['b64'][0] == "1" or query['b64'][0].lower() == "true":
+                b64 = True
         if 'j' in query:
-            self.logger.warning('JSONP requests are not supported')
+            jsonp = True
+            try:
+                jsonp_index = int(query['j'][0])
+            except (ValueError, KeyError, IndexError):
+                # Invalid JSONP index number
+                pass
+
+        if jsonp and jsonp_index is None:
+            self.logger.warning('Invalid JSONP index number')
             r = self._bad_request()
-        else:
-            sid = query['sid'][0] if 'sid' in query else None
-            b64 = False
-            if 'b64' in query:
-                if query['b64'][0] == "1" or query['b64'][0].lower() == "true":
-                    b64 = True
-            if method == 'GET':
-                if sid is None:
-                    transport = query.get('transport', ['polling'])[0]
-                    if transport != 'polling' and transport != 'websocket':
-                        self.logger.warning('Invalid transport %s', transport)
-                        r = self._bad_request()
-                    else:
-                        r = await self._handle_connect(environ, transport,
-                                                       b64)
+        elif method == 'GET':
+            if sid is None:
+                transport = query.get('transport', ['polling'])[0]
+                if transport != 'polling' and transport != 'websocket':
+                    self.logger.warning('Invalid transport %s', transport)
+                    r = self._bad_request()
                 else:
-                    if sid not in self.sockets:
-                        self.logger.warning('Invalid session %s', sid)
-                        r = self._bad_request()
-                    else:
-                        socket = self._get_socket(sid)
-                        try:
-                            packets = await socket.handle_get_request(environ)
-                            if isinstance(packets, list):
-                                r = self._ok(packets, b64=b64)
-                            else:
-                                r = packets
-                        except exceptions.EngineIOError:
-                            if sid in self.sockets:  # pragma: no cover
-                                await self.disconnect(sid)
-                            r = self._bad_request()
-                        if sid in self.sockets and self.sockets[sid].closed:
-                            del self.sockets[sid]
-            elif method == 'POST':
-                if sid is None or sid not in self.sockets:
+                    r = await self._handle_connect(environ, transport,
+                                                   b64, jsonp_index)
+            else:
+                if sid not in self.sockets:
                     self.logger.warning('Invalid session %s', sid)
                     r = self._bad_request()
                 else:
                     socket = self._get_socket(sid)
                     try:
-                        await socket.handle_post_request(environ)
-                        r = self._ok()
+                        packets = await socket.handle_get_request(environ)
+                        if isinstance(packets, list):
+                            r = self._ok(packets, b64=b64,
+                                         jsonp_index=jsonp_index)
+                        else:
+                            r = packets
                     except exceptions.EngineIOError:
                         if sid in self.sockets:  # pragma: no cover
                             await self.disconnect(sid)
                         r = self._bad_request()
-                    except:  # pragma: no cover
-                        # for any other unexpected errors, we log the error
-                        # and keep going
-                        self.logger.exception('post request handler error')
-                        r = self._ok()
-            elif method == 'OPTIONS':
-                r = self._ok()
+                    if sid in self.sockets and self.sockets[sid].closed:
+                        del self.sockets[sid]
+        elif method == 'POST':
+            if sid is None or sid not in self.sockets:
+                self.logger.warning('Invalid session %s', sid)
+                r = self._bad_request()
             else:
-                self.logger.warning('Method %s not supported', method)
-                r = self._method_not_found()
+                socket = self._get_socket(sid)
+                try:
+                    await socket.handle_post_request(environ)
+                    r = self._ok(jsonp_index=jsonp_index)
+                except exceptions.EngineIOError:
+                    if sid in self.sockets:  # pragma: no cover
+                        await self.disconnect(sid)
+                    r = self._bad_request()
+                except:  # pragma: no cover
+                    # for any other unexpected errors, we log the error
+                    # and keep going
+                    self.logger.exception('post request handler error')
+                    r = self._ok(jsonp_index=jsonp_index)
+        elif method == 'OPTIONS':
+            r = self._ok()
+        else:
+            self.logger.warning('Method %s not supported', method)
+            r = self._method_not_found()
         if not isinstance(r, dict):
-            return r if r is not None else []
+            return r
         if self.http_compression and \
                 len(r['response']) >= self.compression_threshold:
             encodings = [e.split(';')[0].strip() for e in
@@ -232,7 +332,38 @@ class AsyncServer(server.Server):
         """
         return await asyncio.sleep(seconds)
 
-    async def _handle_connect(self, environ, transport, b64=False):
+    def create_queue(self, *args, **kwargs):
+        """Create a queue object using the appropriate async model.
+
+        This is a utility function that applications can use to create a queue
+        without having to worry about using the correct call for the selected
+        async mode. For asyncio based async modes, this returns an instance of
+        ``asyncio.Queue``.
+        """
+        return asyncio.Queue(*args, **kwargs)
+
+    def get_queue_empty_exception(self):
+        """Return the queue empty exception for the appropriate async model.
+
+        This is a utility function that applications can use to work with a
+        queue without having to worry about using the correct call for the
+        selected async mode. For asyncio based async modes, this returns an
+        instance of ``asyncio.QueueEmpty``.
+        """
+        return asyncio.QueueEmpty
+
+    def create_event(self, *args, **kwargs):
+        """Create an event object using the appropriate async model.
+
+        This is a utility function that applications can use to create an
+        event without having to worry about using the correct call for the
+        selected async mode. For asyncio based async modes, this returns
+        an instance of ``asyncio.Event``.
+        """
+        return asyncio.Event(*args, **kwargs)
+
+    async def _handle_connect(self, environ, transport, b64=False,
+                              jsonp_index=None):
         """Handle a client connection request."""
         if self.start_service_task:
             # start the service task to monitor connected clients
@@ -269,7 +400,8 @@ class AsyncServer(server.Server):
             if self.cookie:
                 headers = [('Set-Cookie', self.cookie + '=' + sid)]
             try:
-                return self._ok(await s.poll(), headers=headers, b64=b64)
+                return self._ok(await s.poll(), headers=headers, b64=b64,
+                                jsonp_index=jsonp_index)
             except exceptions.QueueEmpty:
                 return self._bad_request()
 
@@ -327,6 +459,14 @@ class AsyncServer(server.Server):
                     if not socket.closing and not socket.closed:
                         await socket.check_ping_timeout()
                     await self.sleep(sleep_interval)
+            except (SystemExit, KeyboardInterrupt, asyncio.CancelledError):
+                self.logger.info('service task canceled')
+                break
             except:
+                if asyncio.get_event_loop().is_closed():
+                    self.logger.info('event loop is closed, exiting service '
+                                     'task')
+                    break
+
                 # an unexpected exception has occurred, log it and continue
                 self.logger.exception('service task exception')

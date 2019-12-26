@@ -5,6 +5,7 @@ python-engineio
 Engine.IO server.
 """
 import re
+import sys
 from setuptools import setup
 
 
@@ -24,18 +25,27 @@ setup(
     author_email='miguelgrinberg50@gmail.com',
     description='Engine.IO server',
     long_description=long_description,
-    packages=['engineio'],
+    packages=['engineio', 'engineio.async_drivers'],
     zip_safe=False,
     include_package_data=True,
     platforms='any',
     install_requires=[
         'six>=1.9.0',
     ],
+    extras_require={
+        'client': [
+            'requests>=2.21.0',
+            'websocket-client>=0.54.0',
+        ],
+        'asyncio_client': [
+            'aiohttp>=3.4',
+        ]
+    },
     tests_require=[
         'mock',
         'eventlet',
     ],
-    test_suite='tests',
+    test_suite='tests' if sys.version_info >= (3, 0) else 'tests.common',
     classifiers=[
         'Environment :: Web Environment',
         'Intended Audience :: Developers',

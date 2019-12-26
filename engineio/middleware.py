@@ -1,17 +1,19 @@
+import os
+from engineio.static_files import get_static_file
+
+
 class WSGIApp(object):
     """WSGI application middleware for Engine.IO.
 
-    This middleware dispatches traffic to an Engine.IO application, and
-    optionally forwards regular HTTP traffic to a WSGI application, or serve
-    a list of predefined static files to clients.
+    This middleware dispatches traffic to an Engine.IO application. It can
+    also serve a list of static files to the client, or forward unrelated
+    HTTP traffic to another WSGI application.
 
-    :param engineio_app: The Engine.IO server.
+    :param engineio_app: The Engine.IO server. Must be an instance of the
+                         ``engineio.Server`` class.
     :param wsgi_app: The WSGI app that receives all other traffic.
-    :param static_files: A dictionary where the keys are URLs that should be
-                         served as static files. For each URL, the value is
-                         a dictionary with ``content_type`` and ``filename``
-                         keys. This option is intended to be used for serving
-                         client files during development.
+    :param static_files: A dictionary with static file mapping rules. See the
+                         documentation for details on this argument.
     :param engineio_path: The endpoint where the Engine.IO application should
                           be installed. The default value is appropriate for
                           most cases.
@@ -56,19 +58,30 @@ class WSGIApp(object):
         if path is not None and \
                 path.startswith('/{0}/'.format(self.engineio_path)):
             return self.engineio_app.handle_request(environ, start_response)
-        elif path in self.static_files:
-            start_response(
-                '200 OK',
-                [('Content-Type', self.static_files[path]['content_type'])])
-            with open(self.static_files[path]['filename'], 'rb') as f:
-                return [f.read()]
-        elif self.wsgi_app is not None:
-            return self.wsgi_app(environ, start_response)
         else:
-            start_response("404 Not Found", [('Content-type', 'text/plain')])
-            return ['Not Found']
+            static_file = get_static_file(path, self.static_files) \
+                if self.static_files else None
+            if static_file:
+                if os.path.exists(static_file['filename']):
+                    start_response(
+                        '200 OK',
+                        [('Content-Type', static_file['content_type'])])
+                    with open(static_file['filename'], 'rb') as f:
+                        return [f.read()]
+                else:
+                    return self.not_found(start_response)
+            elif self.wsgi_app is not None:
+                return self.wsgi_app(environ, start_response)
+        return self.not_found(start_response)
+
+    def not_found(self, start_response):
+        start_response("404 Not Found", [('Content-Type', 'text/plain')])
+        return [b'Not Found']
 
 
 class Middleware(WSGIApp):
-    """This class has been renamed to WSGIApp and is now deprecated."""
-    pass
+    """This class has been renamed to ``WSGIApp`` and is now deprecated."""
+    def __init__(self, engineio_app, wsgi_app=None,
+                 engineio_path='engine.io'):
+        super(Middleware, self).__init__(engineio_app, wsgi_app,
+                                         engineio_path=engineio_path)
