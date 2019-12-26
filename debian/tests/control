@@ -1,3 +1,2 @@
-Test-Command: python3 -m unittest debian/tests/test_async_asgi.py
-Depends: python3-engineio
+Test-Command: python3 -m unittest debian/tests/test_async_eventlet.py
 Restrictions: allow-stderr
