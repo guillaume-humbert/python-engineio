@@ -15,14 +15,14 @@ python-engineio (3.11.1-1) unstable; urgency=medium
       - Changed Maintainer's email.
       - Listed all upstream files in copyright.
       - Updated upstream code and packaging copyrights years.
-  * debian/manpage/*: added files from upstream to build manpage.
+  * debian/manpage/python-engineio.1: added.
   * debian/manpages: changed to get manpage from the right place.
   * debian/upstream/CHANGES.md: added because upstream didn't include it on
     the tarball.
   * debian/README.source: deleted because upstream removed exemples/* files.
   * debian/rules:
       - Added override_dh_auto_test to skip tests.
-      - Changed to build manpage in the right place.
+      - Removed manpage building.
   * debian/tests/*: changed to perform trivial tests.
 
  -- Paulo Henrique de Lima Santana (phls) <phls@debian.org>  Thu, 26 Dec 2019 16:33:42 +0300
