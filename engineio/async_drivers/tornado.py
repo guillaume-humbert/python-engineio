@@ -1,12 +1,10 @@
 import asyncio
 import sys
 from urllib.parse import urlsplit
+from .. import exceptions
 
-try:
-    import tornado.web
-    import tornado.websocket
-except ImportError:  # pragma: no cover
-    pass
+import tornado.web
+import tornado.websocket
 import six
 
 
@@ -14,17 +12,33 @@ def get_tornado_handler(engineio_server):
     class Handler(tornado.websocket.WebSocketHandler):  # pragma: no cover
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
+            if isinstance(engineio_server.cors_allowed_origins,
+                          six.string_types):
+                if engineio_server.cors_allowed_origins == '*':
+                    self.allowed_origins = None
+                else:
+                    self.allowed_origins = [
+                        engineio_server.cors_allowed_origins]
+            else:
+                self.allowed_origins = engineio_server.cors_allowed_origins
             self.receive_queue = asyncio.Queue()
 
-        async def get(self):
+        async def get(self, *args, **kwargs):
             if self.request.headers.get('Upgrade', '').lower() == 'websocket':
-                super().get()
+                ret = super().get(*args, **kwargs)
+                if asyncio.iscoroutine(ret):
+                    await ret
+            else:
+                await engineio_server.handle_request(self)
+
+        async def open(self, *args, **kwargs):
+            # this is the handler for the websocket request
+            asyncio.ensure_future(engineio_server.handle_request(self))
+
+        async def post(self, *args, **kwargs):
             await engineio_server.handle_request(self)
 
-        async def post(self):
-            await engineio_server.handle_request(self)
-
-        async def options(self):
+        async def options(self, *args, **kwargs):
             await engineio_server.handle_request(self)
 
         async def on_message(self, message):
@@ -35,6 +49,15 @@ def get_tornado_handler(engineio_server):
 
         def on_close(self):
             self.receive_queue.put_nowait(None)
+
+        def check_origin(self, origin):
+            if self.allowed_origins is None or origin in self.allowed_origins:
+                return True
+            return super().check_origin(origin)
+
+        def get_compression_options(self):
+            # enable compression
+            return {}
 
     return Handler
 
@@ -109,7 +132,12 @@ def make_response(status, headers, payload, environ):
     mode.
     """
     tornado_handler = environ['tornado.handler']
-    tornado_handler.set_status(int(status.split()[0]))
+    try:
+        tornado_handler.set_status(int(status.split()[0]))
+    except RuntimeError:  # pragma: no cover
+        # for websocket connections Tornado does not accept a response, since
+        # it already emitted the 101 status code
+        return
     for header, value in headers:
         tornado_handler.set_header(header, value)
     tornado_handler.write(payload)
@@ -134,8 +162,11 @@ class WebSocket(object):  # pragma: no cover
         self.tornado_handler.close()
 
     async def send(self, message):
-        self.tornado_handler.write_message(
-            message, binary=isinstance(message, bytes))
+        try:
+            self.tornado_handler.write_message(
+                message, binary=isinstance(message, bytes))
+        except tornado.websocket.WebSocketClosedError:
+            raise exceptions.EngineIOError()
 
     async def wait(self):
         msg = await self.tornado_handler.get_next_message()
@@ -149,6 +180,5 @@ _async = {
     'asyncio': True,
     'translate_request': translate_request,
     'make_response': make_response,
-    'websocket': sys.modules[__name__],
-    'websocket_class': 'WebSocket'
+    'websocket': WebSocket,
 }

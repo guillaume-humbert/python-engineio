@@ -1,8 +1,12 @@
-import asyncio
 import sys
 from urllib.parse import urlsplit
 
-from aiohttp.web import Response, WebSocketResponse
+from sanic.response import HTTPResponse
+try:
+    from sanic.websocket import WebSocketProtocol
+except ImportError:
+    # the installed version of sanic does not have websocket support
+    WebSocketProtocol = None
 import six
 
 
@@ -13,41 +17,54 @@ def create_route(app, engineio_server, engineio_endpoint):
     Note that both GET and POST requests must be hooked up on the engine.io
     endpoint.
     """
-    app.router.add_get(engineio_endpoint, engineio_server.handle_request)
-    app.router.add_post(engineio_endpoint, engineio_server.handle_request)
-    app.router.add_route('OPTIONS', engineio_endpoint,
-                         engineio_server.handle_request)
+    app.add_route(engineio_server.handle_request, engineio_endpoint,
+                  methods=['GET', 'POST', 'OPTIONS'])
+    try:
+        app.enable_websocket()
+    except AttributeError:
+        # ignore, this version does not support websocket
+        pass
 
 
 def translate_request(request):
     """This function takes the arguments passed to the request handler and
     uses them to generate a WSGI compatible environ dictionary.
     """
-    message = request._message
-    payload = request._payload
+    class AwaitablePayload(object):
+        def __init__(self, payload):
+            self.payload = payload or b''
 
-    uri_parts = urlsplit(message.path)
+        async def read(self, length=None):
+            if length is None:
+                r = self.payload
+                self.payload = b''
+            else:
+                r = self.payload[:length]
+                self.payload = self.payload[length:]
+            return r
+
+    uri_parts = urlsplit(request.url)
     environ = {
-        'wsgi.input': payload,
+        'wsgi.input': AwaitablePayload(request.body),
         'wsgi.errors': sys.stderr,
         'wsgi.version': (1, 0),
         'wsgi.async': True,
         'wsgi.multithread': False,
         'wsgi.multiprocess': False,
         'wsgi.run_once': False,
-        'SERVER_SOFTWARE': 'aiohttp',
-        'REQUEST_METHOD': message.method,
+        'SERVER_SOFTWARE': 'sanic',
+        'REQUEST_METHOD': request.method,
         'QUERY_STRING': uri_parts.query or '',
-        'RAW_URI': message.path,
-        'SERVER_PROTOCOL': 'HTTP/%s.%s' % message.version,
+        'RAW_URI': request.url,
+        'SERVER_PROTOCOL': 'HTTP/' + request.version,
         'REMOTE_ADDR': '127.0.0.1',
         'REMOTE_PORT': '0',
-        'SERVER_NAME': 'aiohttp',
+        'SERVER_NAME': 'sanic',
         'SERVER_PORT': '0',
-        'aiohttp.request': request
+        'sanic.request': request
     }
 
-    for hdr_name, hdr_value in message.headers.items():
+    for hdr_name, hdr_value in request.headers.items():
         hdr_name = hdr_name.upper()
         if hdr_name == 'CONTENT-TYPE':
             environ['CONTENT_TYPE'] = hdr_value
@@ -76,13 +93,20 @@ def make_response(status, headers, payload, environ):
     """This function generates an appropriate response object for this async
     mode.
     """
-    return Response(body=payload, status=int(status.split()[0]),
-                    headers=headers)
+    headers_dict = {}
+    content_type = None
+    for h in headers:
+        if h[0].lower() == 'content-type':
+            content_type = h[1]
+        else:
+            headers_dict[h[0]] = h[1]
+    return HTTPResponse(body_bytes=payload, content_type=content_type,
+                        status=int(status.split()[0]), headers=headers_dict)
 
 
 class WebSocket(object):  # pragma: no cover
     """
-    This wrapper class provides a aiohttp WebSocket interface that is
+    This wrapper class provides a sanic WebSocket interface that is
     somewhat compatible with eventlet's implementation.
     """
     def __init__(self, handler):
@@ -90,33 +114,25 @@ class WebSocket(object):  # pragma: no cover
         self._sock = None
 
     async def __call__(self, environ):
-        request = environ['aiohttp.request']
-        self._sock = WebSocketResponse()
-        await self._sock.prepare(request)
+        request = environ['sanic.request']
+        protocol = request.transport.get_protocol()
+        self._sock = await protocol.websocket_handshake(request)
 
         self.environ = environ
         await self.handler(self)
-        return self._sock
 
     async def close(self):
         await self._sock.close()
 
     async def send(self, message):
-        if isinstance(message, bytes):
-            f = self._sock.send_bytes
-        else:
-            f = self._sock.send_str
-        if asyncio.iscoroutinefunction(f):
-            await f(message)
-        else:
-            f(message)
+        await self._sock.send(message)
 
     async def wait(self):
-        msg = await self._sock.receive()
-        if not isinstance(msg.data, six.binary_type) and \
-                not isinstance(msg.data, six.text_type):
+        data = await self._sock.recv()
+        if not isinstance(data, six.binary_type) and \
+                not isinstance(data, six.text_type):
             raise IOError()
-        return msg.data
+        return data
 
 
 _async = {
@@ -124,6 +140,5 @@ _async = {
     'create_route': create_route,
     'translate_request': translate_request,
     'make_response': make_response,
-    'websocket': sys.modules[__name__],
-    'websocket_class': 'WebSocket'
+    'websocket': WebSocket if WebSocketProtocol else None,
 }

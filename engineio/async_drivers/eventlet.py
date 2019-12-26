@@ -1,6 +1,7 @@
-import importlib
-import sys
+from __future__ import absolute_import
 
+from eventlet.green.threading import Thread, Event
+from eventlet import queue
 from eventlet import sleep
 from eventlet.websocket import WebSocketWSGI as _WebSocketWSGI
 
@@ -20,11 +21,10 @@ class WebSocketWSGI(_WebSocketWSGI):
 
 
 _async = {
-    'threading': importlib.import_module('eventlet.green.threading'),
-    'thread_class': 'Thread',
-    'queue': importlib.import_module('eventlet.queue'),
-    'queue_class': 'Queue',
-    'websocket': sys.modules[__name__],
-    'websocket_class': 'WebSocketWSGI',
-    'sleep': sleep
+    'thread': Thread,
+    'queue': queue.Queue,
+    'queue_empty': queue.Empty,
+    'event': Event,
+    'websocket': WebSocketWSGI,
+    'sleep': sleep,
 }

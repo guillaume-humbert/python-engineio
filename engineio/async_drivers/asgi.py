@@ -1,19 +1,20 @@
+import os
 import sys
+
+from engineio.static_files import get_static_file
 
 
 class ASGIApp:
     """ASGI application middleware for Engine.IO.
 
-    This middleware dispatches traffic to an Engine.IO application, and
-    optionally serve a list of static files to the client or forward regular
+    This middleware dispatches traffic to an Engine.IO application. It can
+    also serve a list of static files to the client, or forward unrelated
     HTTP traffic to another ASGI application.
 
-    :param engineio_server: The Engine.IO server.
-    :param static_files: A dictionary where the keys are URLs that should be
-                         served as static files. For each URL, the value is
-                         a dictionary with ``content_type`` and ``filename``
-                         keys. This option is intended to be used for serving
-                         client files during development.
+    :param engineio_server: The Engine.IO server. Must be an instance of the
+                            ``engineio.AsyncServer`` class.
+    :param static_files: A dictionary with static file mapping rules. See the
+                         documentation for details on this argument.
     :param other_asgi_app: A separate ASGI app that receives all other traffic.
     :param engineio_path: The endpoint where the Engine.IO application should
                           be installed. The default value is appropriate for
@@ -24,7 +25,7 @@ class ASGIApp:
         import engineio
         import uvicorn
 
-        eio = engineio.Server()
+        eio = engineio.AsyncServer()
         app = engineio.ASGIApp(eio, static_files={
             '/': {'content_type': 'text/html', 'filename': 'index.html'},
             '/index.html': {'content_type': 'text/html',
@@ -39,45 +40,37 @@ class ASGIApp:
         self.engineio_path = engineio_path.strip('/')
         self.static_files = static_files or {}
 
-    def __call__(self, scope):
+    async def __call__(self, scope, receive, send):
         if scope['type'] in ['http', 'websocket'] and \
                 scope['path'].startswith('/{0}/'.format(self.engineio_path)):
-            return self.engineio_asgi_app(scope)
-        elif scope['type'] == 'http' and scope['path'] in self.static_files:
-            return self.serve_static_file(scope)
-        elif self.other_asgi_app is not None:
-            return self.other_asgi_app(scope)
-        elif scope['type'] == 'lifespan':
-            return self.lifespan
-        else:
-            return self.not_found
-
-    def engineio_asgi_app(self, scope):
-        async def _app(receive, send):
             await self.engineio_server.handle_request(scope, receive, send)
-        return _app
+        else:
+            static_file = get_static_file(scope['path'], self.static_files) \
+                if scope['type'] == 'http' and self.static_files else None
+            if static_file:
+                await self.serve_static_file(static_file, receive, send)
+            elif self.other_asgi_app is not None:
+                await self.other_asgi_app(scope, receive, send)
+            elif scope['type'] == 'lifespan':
+                await self.lifespan(receive, send)
+            else:
+                await self.not_found(receive, send)
 
-    def serve_static_file(self, scope):
-        async def _send_static_file(receive, send):  # pragma: no cover
-            event = await receive()
-            if event['type'] == 'http.request':
-                if scope['path'] in self.static_files:
-                    content_type = self.static_files[scope['path']][
-                        'content_type'].encode('utf-8')
-                    filename = self.static_files[scope['path']]['filename']
-                    status_code = 200
-                    with open(filename, 'rb') as f:
-                        payload = f.read()
-                else:
-                    content_type = b'text/plain'
-                    status_code = 404
-                    payload = b'not found'
+    async def serve_static_file(self, static_file, receive,
+                                send):  # pragma: no cover
+        event = await receive()
+        if event['type'] == 'http.request':
+            if os.path.exists(static_file['filename']):
+                with open(static_file['filename'], 'rb') as f:
+                    payload = f.read()
                 await send({'type': 'http.response.start',
-                            'status': status_code,
-                            'headers': [(b'Content-Type', content_type)]})
+                            'status': 200,
+                            'headers': [(b'Content-Type', static_file[
+                                'content_type'].encode('utf-8'))]})
                 await send({'type': 'http.response.body',
                             'body': payload})
-        return _send_static_file
+            else:
+                await self.not_found(receive, send)
 
     async def lifespan(self, receive, send):
         event = await receive()
@@ -92,7 +85,7 @@ class ASGIApp:
                     'status': 404,
                     'headers': [(b'Content-Type', b'text/plain')]})
         await send({'type': 'http.response.body',
-                    'body': b'not found'})
+                    'body': b'Not Found'})
 
 
 async def translate_request(scope, receive, send):
@@ -217,6 +210,5 @@ _async = {
     'asyncio': True,
     'translate_request': translate_request,
     'make_response': make_response,
-    'websocket': sys.modules[__name__],
-    'websocket_class': 'WebSocket'
+    'websocket': WebSocket,
 }
