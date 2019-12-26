@@ -3,7 +3,8 @@ Upstream-Name: python-engineio
 Source: https://pypi.python.org/pypi/python-engineio
 Comment: Repository on GitHub: https://github.com/miguelgrinberg/python-engineio
 
-Files: engineio/async_drivers/aiohttp.py
+Files: engineio/async_drivers/__init__.py
+       engineio/async_drivers/aiohttp.py
        engineio/async_drivers/asgi.py
        engineio/async_drivers/eventlet.py
        engineio/async_drivers/gevent.py
@@ -23,6 +24,12 @@ Files: engineio/async_drivers/aiohttp.py
        engineio/server.py
        engineio/socket.py
        engineio/static_files.py
+       python_engineio.egg-info/PKG-INFO
+       python_engineio.egg-info/SOURCES.txt
+       python_engineio.egg-info/dependency_links.txt
+       python_engineio.egg-info/not-zip-safe
+       python_engineio.egg-info/requires.txt
+       python_engineio.egg-info/top_level.txt
        MANIFEST.in
        PKG-INFO
        README.rst
