@@ -3,13 +3,38 @@ Upstream-Name: python-engineio
 Source: https://pypi.python.org/pypi/python-engineio
 Comment: Repository on GitHub: https://github.com/miguelgrinberg/python-engineio
 
-Files: *
-Copyright: 2015-2018 Miguel Grinberg <miguelgrinberg50@gmail.com>
+Files: engineio/async_drivers/aiohttp.py
+       engineio/async_drivers/asgi.py
+       engineio/async_drivers/eventlet.py
+       engineio/async_drivers/gevent.py
+       engineio/async_drivers/gevent_uwsgi.py
+       engineio/async_drivers/sanic.py
+       engineio/async_drivers/threading.py
+       engineio/async_drivers/tornado.py
+       engineio/asyncio_client.py
+       engineio/asyncio_server.py
+       engineio/asyncio_socket.py
+       engineio/client.py
+       engineio/exceptions.py
+       engineio/__init__.py
+       engineio/middleware.py
+       engineio/packet.py
+       engineio/payload.py
+       engineio/server.py
+       engineio/socket.py
+       engineio/static_files.py
+       MANIFEST.in
+       PKG-INFO
+       README.rst
+       setup.cfg
+       setup.py
+Copyright: 2015-2019, Miguel Grinberg <miguelgrinberg50@gmail.com>
 License: MIT
-Comment: The last version was released in 2018.
+Comment:
+ Using license as found in LICENSE file.
 
 Files: debian/*
-Copyright: 2017-2018 Paulo Henrique de Lima Santana (phls) <paulo@phls.com.br>
+Copyright: 2017-2019, Paulo Henrique de Lima Santana (phls) <phls@debian.org>
 License: MIT
 
 License: MIT
