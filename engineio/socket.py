@@ -1,6 +1,7 @@
-import time
 import six
+import time
 
+from . import exceptions
 from . import packet
 from . import payload
 
@@ -29,7 +30,7 @@ class Socket(object):
             packets = [self.queue.get(timeout=self.server.ping_timeout)]
             self.queue.task_done()
         except self.server._async['queue'].Empty:
-            raise IOError()
+            raise exceptions.QueueEmpty()
         if packets == [None]:
             return []
         try:
@@ -58,7 +59,7 @@ class Socket(object):
         elif pkt.packet_type == packet.CLOSE:
             self.close(wait=False, abort=True)
         else:
-            raise ValueError
+            raise exceptions.UnknownPacketError()
 
     def send(self, pkt):
         """Send a packet to the client."""
@@ -88,16 +89,16 @@ class Socket(object):
                                                           start_response)
         try:
             packets = self.poll()
-        except IOError as e:
+        except exceptions.QueueEmpty:
             self.close(wait=False)
-            raise e
+            raise
         return packets
 
     def handle_post_request(self, environ):
         """Handle a long-polling POST request from the client."""
         length = int(environ.get('CONTENT_LENGTH', '0'))
         if length > self.server.max_http_buffer_size:
-            raise ValueError()
+            raise exceptions.ContentTooLongError()
         else:
             body = environ['wsgi.input'].read(length)
             p = payload.Payload(encoded_payload=body)
@@ -130,6 +131,11 @@ class Socket(object):
 
     def _websocket_handler(self, ws):
         """Engine.IO handler for websocket transport."""
+        # try to set a socket timeout matching the configured ping interval
+        for attr in ['_sock', 'socket']:  # pragma: no cover
+            if hasattr(ws, attr) and hasattr(getattr(ws, attr), 'settimeout'):
+                getattr(ws, attr).settimeout(self.server.ping_timeout)
+
         if self.connected:
             # the socket was already connected, so this is an upgrade
             self.queue.join()  # flush the queue first
@@ -163,9 +169,10 @@ class Socket(object):
         # start separate writer thread
         def writer():
             while True:
+                packets = None
                 try:
                     packets = self.poll()
-                except IOError:
+                except exceptions.QueueEmpty:
                     break
                 if not packets:
                     # empty packet list returned -> connection closed
@@ -184,7 +191,13 @@ class Socket(object):
             p = None
             try:
                 p = ws.wait()
-            except:
+            except Exception as e:
+                # if the socket is already closed, we can assume this is a
+                # downstream error of that
+                if not self.closed:  # pragma: no cover
+                    self.server.logger.info(
+                        '%s: Unexpected error "%s", closing connection',
+                        self.sid, str(e))
                 break
             if p is None:
                 # connection closed by client
@@ -194,8 +207,13 @@ class Socket(object):
             pkt = packet.Packet(encoded_packet=p)
             try:
                 self.receive(pkt)
-            except ValueError:
+            except exceptions.UnknownPacketError:
                 pass
+            except:  # pragma: no cover
+                # if we get an unexpected exception we log the error and exit
+                # the connection properly
+                self.server.logger.exception('Receive error')
+                break
 
         self.queue.put(None)  # unlock the writer task so that it can exit
         writer_task.join()
