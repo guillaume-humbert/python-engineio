@@ -20,7 +20,7 @@ python-engineio (3.11.1-1) unstable; urgency=medium
     the tarball.
   * debian/README.source: deleted because upstream removed exemples/* files.
   * debian/rules:
-      - Add override_dh_auto_test to skip tests.
+      - Added override_dh_auto_test to skip tests.
       - Changed to build manpage in the right place.
   * debian/tests/*: changed to perform trivial tests.
 
