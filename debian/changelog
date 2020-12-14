@@ -1,3 +1,9 @@
+python-engineio (4.0.0-1) focal; urgency=medium
+
+  * New upstream version 4.0.0
+
+ -- Guillaume J Humbert <guillaume.j.humbert@pm.me>  Tue, 15 Dec 2020 07:32:09 +0800
+
 python-engineio (3.11.1-1) unstable; urgency=medium
 
   * New upstream version 3.11.1. Consequently fix CVE-2019-13611: websocket
